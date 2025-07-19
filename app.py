@@ -12,6 +12,8 @@ import math
 import json
 import os
 import shutil
+import psutil
+import gc
 
 app = Flask(__name__)
 
@@ -21,11 +23,27 @@ current_image = None
 smolvlm_patch_size = 512
 smolvlm_token_patch_size = 8
 
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    return {
+        'rss': memory_info.rss / 1024 / 1024,  # Resident Set Size (physical memory)
+        'vms': memory_info.vms / 1024 / 1024   # Virtual Memory Size
+    }
+
+def log_memory(location):
+    """Log memory usage at a specific location"""
+    memory = get_memory_usage()
+    print(f"MEMORY [{location}]: RSS={memory['rss']:.1f}MB, VMS={memory['vms']:.1f}MB")
+
 def load_data():
     """Load the decoded tokens only - attention data will be loaded per layer"""
     global decoded_tokens
+    log_memory("load_data_start")
     try:
         decoded_tokens = np.load("decoded_tokens.npy").tolist()
+        log_memory("load_data_after_tokens")
         return True
     except FileNotFoundError as e:
         print(f"Error loading data: {e}")
@@ -34,6 +52,7 @@ def load_data():
 def load_attention_layer(layer_index):
     """Load attention data for a specific layer"""
     try:
+        log_memory(f"before_load_layer_{layer_index}")
         filename = f"attentions/attention_fp16_rounded_layer_{layer_index}.npz"
         
         # Check if file exists
@@ -41,6 +60,7 @@ def load_attention_layer(layer_index):
             return None
             
         attention_layer = np.load(filename)['attention']
+        log_memory(f"after_load_layer_{layer_index}")
         return attention_layer
     except FileNotFoundError as e:
         return None
@@ -68,14 +88,21 @@ def get_word_attention(word, decoded_tokens, layer_index, word_index=None):
         if word_index is not None:
             # Use provided index directly
             if 0 <= word_index < len(decoded_tokens):
-                word_attn = attention_layer[0, :, word_index, :]
+                word_attn = attention_layer[0, :, word_index, :].copy()  # Copy to new array
+                del attention_layer  # Immediately free the large layer data
+                gc.collect()  # Force garbage collection
+                log_memory("after_extracting_word_attention")
                 return word_attn, word_index
             else:
+                del attention_layer  # Free memory even on error
                 return None, None
         else:
             # Fallback to searching for the word
             word_index = decoded_tokens.index(word)
-            word_attn = attention_layer[0, :, word_index, :]
+            word_attn = attention_layer[0, :, word_index, :].copy()  # Copy to new array
+            del attention_layer  # Immediately free the large layer data
+            gc.collect()  # Force garbage collection
+            log_memory("after_extracting_word_attention")
             return word_attn, word_index
     except (ValueError, IndexError) as e:
         return None, None
@@ -91,21 +118,23 @@ def build_image_patch_dict(decoded_tokens):
 def reshape_patch(patch):
     """Reshape patch to full image dimensions"""
     expanded_size = smolvlm_token_patch_size**2
-    expanded_patch = np.zeros((smolvlm_patch_size, smolvlm_patch_size))
+    expanded_patch = np.zeros((smolvlm_patch_size, smolvlm_patch_size), dtype=np.float32)
     square_patch = patch.reshape(smolvlm_token_patch_size, smolvlm_token_patch_size)
     
     for i in range(smolvlm_token_patch_size):
         for j in range(smolvlm_token_patch_size):
-            expanded_section = np.ones((expanded_size, expanded_size)) * square_patch[i][j]
+            # Direct assignment instead of creating temporary expanded_section
+            value = square_patch[i, j]
             expanded_patch[i*expanded_size:i*expanded_size + expanded_size, 
-                          j*expanded_size:j*expanded_size+expanded_size] = expanded_section
+                          j*expanded_size:j*expanded_size+expanded_size] = value
     
+    del square_patch  # Clean up intermediate array
     return expanded_patch
 
 def get_attn_map(word_attn, head, patch_indices, num_rows=3, num_cols=4):
     """Generate attention map for given head (layer already selected in word_attn)"""
     attn = word_attn[head, :]
-    final_heatmap = np.zeros((512 * num_rows, 512 * num_cols))
+    final_heatmap = np.zeros((512 * num_rows, 512 * num_cols), dtype=np.float32)  # Use float32 to save memory
     
     for i in range(num_rows):
         for j in range(num_cols):
@@ -115,7 +144,9 @@ def get_attn_map(word_attn, head, patch_indices, num_rows=3, num_cols=4):
                 attn_patch = attn[indices]
                 p = reshape_patch(attn_patch)
                 final_heatmap[i*512:i*512 + 512, j*512: j*512 + 512] = p
+                del attn_patch, p  # Delete intermediate arrays immediately
     
+    del attn  # Free the attention array
     return final_heatmap
 
 def find_subarray_indices(arr, subarr):
@@ -131,27 +162,47 @@ def create_attention_heatmap(final_heatmap, image):
     resized_w = math.ceil(image_w / smolvlm_patch_size) * smolvlm_patch_size
     resized_h = math.ceil(image_h / smolvlm_patch_size) * smolvlm_patch_size
     
+    log_memory("before_heatmap_normalization")
+    
     # Check if heatmap has valid range
-    heatmap_range = final_heatmap.max() - final_heatmap.min()
+    heatmap_min = final_heatmap.min()
+    heatmap_max = final_heatmap.max()
+    heatmap_range = heatmap_max - heatmap_min
     
     if heatmap_range == 0:
-        normalized_heatmap = np.ones_like(final_heatmap) * 0.5  # Use uniform mid-value
+        # In-place modification to save memory
+        final_heatmap.fill(0.5)
+        normalized_heatmap = final_heatmap
     else:
-        # Normalize heatmap to [0, 1]
-        normalized_heatmap = (final_heatmap - final_heatmap.min()) / heatmap_range
+        # In-place normalization to save memory
+        final_heatmap -= heatmap_min
+        final_heatmap /= heatmap_range
+        normalized_heatmap = final_heatmap
     
-    # Create the heatmap as a transparent overlay
-    plt.figure(figsize=(resized_w/100, resized_h/100), dpi=100)
-    plt.imshow(normalized_heatmap, cmap='hot', alpha=0.7)
+    log_memory("after_heatmap_normalization")
+    
+    # Create smaller figure and use memory-efficient settings
+    fig = plt.figure(figsize=(resized_w/100, resized_h/100), dpi=100)
+    plt.imshow(normalized_heatmap, cmap='hot', alpha=0.7, interpolation='nearest')  # nearest is memory efficient
     plt.axis("off")
     plt.gca().set_position([0, 0, 1, 1])  # Remove all margins
     
-    # Save to base64 string
+    log_memory("after_matplotlib_setup")
+    
+    # Save to base64 string with memory-efficient buffer
     buffer = BytesIO()
     plt.savefig(buffer, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=100)
     buffer.seek(0)
     heatmap_base64 = base64.b64encode(buffer.getvalue()).decode()
-    plt.close()
+    
+    # Aggressive cleanup
+    plt.close(fig)
+    plt.clf()
+    buffer.close()
+    del normalized_heatmap, final_heatmap
+    gc.collect()
+    
+    log_memory("after_matplotlib_cleanup")
     
     return heatmap_base64, resized_w, resized_h
 
@@ -163,6 +214,7 @@ def index():
 @app.route('/api/initialize')
 def initialize():
     """Initialize the application with data"""
+    log_memory("initialize_start")
     success = load_data()
     if success:
         # Load local image - try both locations
@@ -286,8 +338,9 @@ def initialize():
                     num_heads = first_layer.shape[1]
             except Exception as e:
                 print(f"Could not determine number of heads: {e}")
-                num_heads = 12  # Default fallback
+                num_heads = 9  # Default fallback
             
+            log_memory("initialize_complete")
             return jsonify({
                 'success': True,
                 'prompt': prompt_text,
@@ -304,6 +357,8 @@ def initialize():
 @app.route('/api/generate_attention_map', methods=['POST'])
 def generate_attention_map():
     """Generate attention map for given parameters"""
+    log_memory("generate_attention_start")
+    
     data = request.json
     word = data.get('word')
     word_index = data.get('word_index')
@@ -318,13 +373,29 @@ def generate_attention_map():
     if word_attn is None:
         return jsonify({'success': False, 'error': f'Word "{word}" not found in tokens or could not load layer {layer}'})
     
+    log_memory("after_word_attention_extracted")
+    
     # Build patch dictionary
     patch_indices = build_image_patch_dict(decoded_tokens)
     
     # Generate attention map
     try:
+        log_memory("before_attn_map_generation")
         attn_map = get_attn_map(word_attn, head, patch_indices)
+        
+        # Free word_attn immediately after use
+        del word_attn
+        gc.collect()
+        log_memory("after_attn_map_generation")
+        
         heatmap_base64, resized_w, resized_h = create_attention_heatmap(attn_map, current_image)
+        # Note: attn_map is deleted inside create_attention_heatmap now
+        log_memory("after_heatmap_creation")
+        
+        # Final cleanup
+        del patch_indices
+        gc.collect()
+        log_memory("after_final_cleanup")
         
         return jsonify({
             'success': True,
@@ -336,7 +407,18 @@ def generate_attention_map():
             'head': head
         })
     except Exception as e:
+        # Cleanup on error
+        try:
+            del word_attn, attn_map, patch_indices
+        except:
+            pass
+        gc.collect()
         return jsonify({'success': False, 'error': str(e)})
 
 if __name__ == '__main__':
+    # Set matplotlib to use minimal memory
+    matplotlib.rcParams['figure.max_open_warning'] = 0
+    plt.ioff()  # Turn off interactive mode to save memory
+    
+    log_memory("app_startup")
     app.run(debug=True, host='0.0.0.0', port=5001) 
