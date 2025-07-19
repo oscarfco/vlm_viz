@@ -26,7 +26,8 @@ def load_data():
     """Load the attention array and decoded tokens"""
     global attention_data, decoded_tokens
     try:
-        attention_data = np.load("attention_array.npy", allow_pickle=True)
+        attention_data = np.load("attention_fp16_rounded.npz")['attention']
+        breakpoint()
         decoded_tokens = np.load("decoded_tokens.npy").tolist()
         return True
     except FileNotFoundError as e:
