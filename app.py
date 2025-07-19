@@ -27,7 +27,6 @@ def load_data():
     global attention_data, decoded_tokens
     try:
         attention_data = np.load("attention_fp16_rounded.npz")['attention']
-        breakpoint()
         decoded_tokens = np.load("decoded_tokens.npy").tolist()
         return True
     except FileNotFoundError as e:
