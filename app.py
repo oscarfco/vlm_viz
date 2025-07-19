@@ -16,22 +16,36 @@ import shutil
 app = Flask(__name__)
 
 # Global variables to store loaded data
-attention_data = None
 decoded_tokens = None
 current_image = None
 smolvlm_patch_size = 512
 smolvlm_token_patch_size = 8
 
 def load_data():
-    """Load the attention array and decoded tokens"""
-    global attention_data, decoded_tokens
+    """Load the decoded tokens only - attention data will be loaded per layer"""
+    global decoded_tokens
     try:
-        attention_data = np.load("attention_fp16_rounded.npz")['attention']
         decoded_tokens = np.load("decoded_tokens.npy").tolist()
         return True
     except FileNotFoundError as e:
         print(f"Error loading data: {e}")
         return False
+
+def load_attention_layer(layer_index):
+    """Load attention data for a specific layer"""
+    try:
+        filename = f"attentions/attention_fp16_rounded_layer_{layer_index}.npz"
+        
+        # Check if file exists
+        if not os.path.exists(filename):
+            return None
+            
+        attention_layer = np.load(filename)['attention']
+        return attention_layer
+    except FileNotFoundError as e:
+        return None
+    except Exception as e:
+        return None
 
 def load_image(image_path):
     """Load and process the image"""
@@ -43,22 +57,27 @@ def load_image(image_path):
         print(f"Error loading image: {e}")
         return False
 
-def get_word_attention(word, decoded_tokens, word_index=None):
-    """Get attention for a specific word"""
+def get_word_attention(word, decoded_tokens, layer_index, word_index=None):
+    """Get attention for a specific word and layer"""
     try:
+        # Load the specific layer's attention data
+        attention_layer = load_attention_layer(layer_index)
+        if attention_layer is None:
+            return None, None
+            
         if word_index is not None:
             # Use provided index directly
             if 0 <= word_index < len(decoded_tokens):
-                word_attn = [m[0, :, word_index, :] for m in attention_data]
+                word_attn = attention_layer[0, :, word_index, :]
                 return word_attn, word_index
             else:
                 return None, None
         else:
             # Fallback to searching for the word
             word_index = decoded_tokens.index(word)
-            word_attn = [m[0, :, word_index, :] for m in attention_data]
+            word_attn = attention_layer[0, :, word_index, :]
             return word_attn, word_index
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
         return None, None
 
 def build_image_patch_dict(decoded_tokens):
@@ -83,9 +102,9 @@ def reshape_patch(patch):
     
     return expanded_patch
 
-def get_attn_map(word_attn, layer, head, patch_indices, num_rows=3, num_cols=4):
-    """Generate attention map for given layer and head"""
-    attn = word_attn[layer][head, :]
+def get_attn_map(word_attn, head, patch_indices, num_rows=3, num_cols=4):
+    """Generate attention map for given head (layer already selected in word_attn)"""
+    attn = word_attn[head, :]
     final_heatmap = np.zeros((512 * num_rows, 512 * num_cols))
     
     for i in range(num_rows):
@@ -112,8 +131,14 @@ def create_attention_heatmap(final_heatmap, image):
     resized_w = math.ceil(image_w / smolvlm_patch_size) * smolvlm_patch_size
     resized_h = math.ceil(image_h / smolvlm_patch_size) * smolvlm_patch_size
     
-    # Normalize heatmap to [0, 1]
-    normalized_heatmap = (final_heatmap - final_heatmap.min()) / (final_heatmap.max() - final_heatmap.min())
+    # Check if heatmap has valid range
+    heatmap_range = final_heatmap.max() - final_heatmap.min()
+    
+    if heatmap_range == 0:
+        normalized_heatmap = np.ones_like(final_heatmap) * 0.5  # Use uniform mid-value
+    else:
+        # Normalize heatmap to [0, 1]
+        normalized_heatmap = (final_heatmap - final_heatmap.min()) / heatmap_range
     
     # Create the heatmap as a transparent overlay
     plt.figure(figsize=(resized_w/100, resized_h/100), dpi=100)
@@ -250,9 +275,18 @@ def initialize():
                                 'is_selectable': True
                             })
             
-            # Get dimensions
-            num_layers = len(attention_data)
-            num_heads = attention_data[0].shape[1] if attention_data is not None and len(attention_data) > 0 else 0
+            # Since we now load layers on-demand, we can assume 30 layers and get heads from first layer
+            num_layers = 30
+            num_heads = 0
+            
+            # Try to load first layer to get number of heads
+            try:
+                first_layer = load_attention_layer(0)
+                if first_layer is not None:
+                    num_heads = first_layer.shape[1]
+            except Exception as e:
+                print(f"Could not determine number of heads: {e}")
+                num_heads = 12  # Default fallback
             
             return jsonify({
                 'success': True,
@@ -276,20 +310,20 @@ def generate_attention_map():
     layer = int(data.get('layer', 0))
     head = int(data.get('head', 0))
     
-    if attention_data is None or decoded_tokens is None or current_image is None:
+    if decoded_tokens is None or current_image is None:
         return jsonify({'success': False, 'error': 'Data not loaded'})
     
-    # Get word attention
-    word_attn, word_index = get_word_attention(word, decoded_tokens, word_index)
+    # Get word attention for the specific layer
+    word_attn, word_index = get_word_attention(word, decoded_tokens, layer, word_index)
     if word_attn is None:
-        return jsonify({'success': False, 'error': f'Word "{word}" not found in tokens'})
+        return jsonify({'success': False, 'error': f'Word "{word}" not found in tokens or could not load layer {layer}'})
     
     # Build patch dictionary
     patch_indices = build_image_patch_dict(decoded_tokens)
     
     # Generate attention map
     try:
-        attn_map = get_attn_map(word_attn, layer, head, patch_indices)
+        attn_map = get_attn_map(word_attn, head, patch_indices)
         heatmap_base64, resized_w, resized_h = create_attention_heatmap(attn_map, current_image)
         
         return jsonify({
