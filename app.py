@@ -53,7 +53,7 @@ def load_attention_layer(layer_index):
     """Load attention data for a specific layer"""
     try:
         log_memory(f"before_load_layer_{layer_index}")
-        filename = f"attentions/attention_fp16_rounded_layer_{layer_index}.npz"
+        filename = f"attentions_5/attention_fp16_rounded_layer_{layer_index}.npz"
         
         # Check if file exists
         if not os.path.exists(filename):
@@ -156,13 +156,21 @@ def find_subarray_indices(arr, subarr):
             return i, i + m - 1  # return start and end (exclusive)
     return None  # not found
 
-def create_attention_heatmap(final_heatmap, image):
-    """Create just the attention heatmap for overlay"""
+def create_attention_heatmap(final_heatmap, image, threshold=0.0):
+    """Create attention heatmap and return only min/max values for color scale"""
     image_w, image_h = image.size
     resized_w = math.ceil(image_w / smolvlm_patch_size) * smolvlm_patch_size
     resized_h = math.ceil(image_h / smolvlm_patch_size) * smolvlm_patch_size
     
     log_memory("before_heatmap_normalization")
+    
+    # Capture min/max before normalization (only values actually used by frontend)
+    original_min = float(final_heatmap.min())
+    original_max = float(final_heatmap.max())
+    
+    # Apply threshold filter - set values below threshold to 0
+    if threshold > 0.0:
+        final_heatmap[final_heatmap < threshold] = 0.0
     
     # Check if heatmap has valid range
     heatmap_min = final_heatmap.min()
@@ -181,30 +189,36 @@ def create_attention_heatmap(final_heatmap, image):
     
     log_memory("after_heatmap_normalization")
     
-    # Create smaller figure and use memory-efficient settings
+    # Create heatmap
     fig = plt.figure(figsize=(resized_w/100, resized_h/100), dpi=100)
-    plt.imshow(normalized_heatmap, cmap='hot', alpha=0.7, interpolation='nearest')  # nearest is memory efficient
+    plt.imshow(normalized_heatmap, cmap='hot', alpha=0.7, interpolation='nearest')
     plt.axis("off")
-    plt.gca().set_position([0, 0, 1, 1])  # Remove all margins
+    plt.gca().set_position([0, 0, 1, 1])
     
     log_memory("after_matplotlib_setup")
     
-    # Save to base64 string with memory-efficient buffer
+    # Save heatmap to base64
     buffer = BytesIO()
     plt.savefig(buffer, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=100)
     buffer.seek(0)
     heatmap_base64 = base64.b64encode(buffer.getvalue()).decode()
-    
-    # Aggressive cleanup
+    buffer.close()
     plt.close(fig)
     plt.clf()
-    buffer.close()
+    
+    # Aggressive cleanup
     del normalized_heatmap, final_heatmap
     gc.collect()
     
     log_memory("after_matplotlib_cleanup")
     
-    return heatmap_base64, resized_w, resized_h
+    # Return only the values used by frontend
+    stats = {
+        'min': original_min,
+        'max': original_max
+    }
+    
+    return heatmap_base64, stats, resized_w, resized_h
 
 @app.route('/')
 def index():
@@ -340,7 +354,6 @@ def initialize():
                 print(f"Could not determine number of heads: {e}")
                 num_heads = 9  # Default fallback
             
-            log_memory("initialize_complete")
             return jsonify({
                 'success': True,
                 'prompt': prompt_text,
@@ -357,13 +370,12 @@ def initialize():
 @app.route('/api/generate_attention_map', methods=['POST'])
 def generate_attention_map():
     """Generate attention map for given parameters"""
-    log_memory("generate_attention_start")
-    
     data = request.json
     word = data.get('word')
     word_index = data.get('word_index')
     layer = int(data.get('layer', 0))
     head = int(data.get('head', 0))
+    threshold = float(data.get('threshold', 0.0))
     
     if decoded_tokens is None or current_image is None:
         return jsonify({'success': False, 'error': 'Data not loaded'})
@@ -373,38 +385,34 @@ def generate_attention_map():
     if word_attn is None:
         return jsonify({'success': False, 'error': f'Word "{word}" not found in tokens or could not load layer {layer}'})
     
-    log_memory("after_word_attention_extracted")
-    
     # Build patch dictionary
     patch_indices = build_image_patch_dict(decoded_tokens)
     
     # Generate attention map
     try:
-        log_memory("before_attn_map_generation")
         attn_map = get_attn_map(word_attn, head, patch_indices)
         
         # Free word_attn immediately after use
         del word_attn
         gc.collect()
-        log_memory("after_attn_map_generation")
         
-        heatmap_base64, resized_w, resized_h = create_attention_heatmap(attn_map, current_image)
+        heatmap_base64, stats, resized_w, resized_h = create_attention_heatmap(attn_map, current_image, threshold)
         # Note: attn_map is deleted inside create_attention_heatmap now
-        log_memory("after_heatmap_creation")
         
         # Final cleanup
         del patch_indices
         gc.collect()
-        log_memory("after_final_cleanup")
         
         return jsonify({
             'success': True,
             'heatmap': heatmap_base64,
+            'stats': stats,
             'heatmap_width': resized_w,
             'heatmap_height': resized_h,
             'word_index': word_index,
             'layer': layer,
-            'head': head
+            'head': head,
+            'threshold': threshold
         })
     except Exception as e:
         # Cleanup on error
@@ -420,5 +428,4 @@ if __name__ == '__main__':
     matplotlib.rcParams['figure.max_open_warning'] = 0
     plt.ioff()  # Turn off interactive mode to save memory
     
-    log_memory("app_startup")
     app.run(debug=True, host='0.0.0.0', port=5001) 

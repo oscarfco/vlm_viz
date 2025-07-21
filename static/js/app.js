@@ -7,6 +7,7 @@ class AttentionVisualizer {
         this.currentWordIndex = null;
         this.currentLayer = 27;
         this.currentHead = 2;
+        this.currentThreshold = 0.0;
         
         this.initializeElements();
         this.bindEvents();
@@ -24,15 +25,18 @@ class AttentionVisualizer {
         this.tokenDisplay = document.getElementById('token-display');
         this.layerRange = document.getElementById('layer-range');
         this.headRange = document.getElementById('head-range');
+        this.thresholdRange = document.getElementById('threshold-range');
         this.generateBtn = document.getElementById('generate-btn');
         this.clearBtn = document.getElementById('clear-btn');
 
         // Display elements
         this.layerValue = document.getElementById('layer-value');
         this.headValue = document.getElementById('head-value');
+        this.thresholdValue = document.getElementById('threshold-value');
         this.currentWordSpan = document.getElementById('current-word');
         this.currentLayerSpan = document.getElementById('current-layer');
         this.currentHeadSpan = document.getElementById('current-head');
+        this.currentThresholdSpan = document.getElementById('current-threshold');
 
         // Images and visualization
         this.originalImage = document.getElementById('original-image');
@@ -54,6 +58,13 @@ class AttentionVisualizer {
         this.headRange.addEventListener('input', (e) => {
             this.currentHead = parseInt(e.target.value);
             this.headValue.textContent = this.currentHead;
+            this.updateCurrentSelection();
+        });
+
+        // Threshold range
+        this.thresholdRange.addEventListener('input', (e) => {
+            this.currentThreshold = parseFloat(e.target.value);
+            this.thresholdValue.textContent = this.currentThreshold.toFixed(4);
             this.updateCurrentSelection();
         });
 
@@ -213,6 +224,7 @@ class AttentionVisualizer {
         this.currentWordSpan.textContent = this.currentWord || '-';
         this.currentLayerSpan.textContent = this.currentLayer;
         this.currentHeadSpan.textContent = this.currentHead;
+        this.currentThresholdSpan.textContent = this.currentThreshold.toFixed(4);
     }
 
     toggleGenerateButton() {
@@ -238,7 +250,8 @@ class AttentionVisualizer {
                     word: this.currentWord,
                     word_index: this.currentWordIndex,
                     layer: this.currentLayer,
-                    head: this.currentHead
+                    head: this.currentHead,
+                    threshold: this.currentThreshold
                 })
             });
 
@@ -246,6 +259,7 @@ class AttentionVisualizer {
 
             if (result.success) {
                 this.displayAttentionOverlay(result.heatmap, result.heatmap_width, result.heatmap_height);
+                this.displayAttentionStats(result.stats);
             } else {
                 this.showError(result.error || 'Failed to generate attention map');
             }
@@ -273,10 +287,25 @@ class AttentionVisualizer {
         };
     }
 
+    displayAttentionStats(stats) {
+        // Update colorbar labels with actual min/max values
+        document.getElementById('colorbar-min').textContent = stats.min.toFixed(3);
+        document.getElementById('colorbar-max').textContent = stats.max.toFixed(3);
+        
+        // Show color scale panel
+        const statsPanel = document.getElementById('attention-stats');
+        statsPanel.classList.remove('d-none');
+        statsPanel.classList.add('fade-in');
+    }
+
     clearAttention() {
         this.attentionOverlay.classList.add('d-none');
         this.attentionStatus.classList.add('d-none');
         this.clearBtn.classList.add('d-none');
+        
+        // Hide statistics panel
+        const statsPanel = document.getElementById('attention-stats');
+        statsPanel.classList.add('d-none');
     }
 
     updateOverlaySize() {

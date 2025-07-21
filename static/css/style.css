@@ -331,3 +331,60 @@ body {
     box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
     transition: box-shadow 0.15s ease-in-out;
 } 
+
+/* Attention Color Scale Styles */
+.colorbar-container {
+    text-align: center;
+}
+
+/* Horizontal Colorbar Styles */
+.horizontal-colorbar-wrapper {
+    position: relative;
+    width: 100%;
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+.horizontal-colorbar {
+    height: 20px;
+    width: 100%;
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    background: linear-gradient(to right, #000000, #8B0000, #FF0000, #FF4500, #FFA500, #FFFF00, #FFFFFF);
+    position: relative;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.colorbar-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: #6c757d;
+}
+
+.colorbar-label {
+    text-align: center;
+    margin-bottom: 0.5rem;
+}
+
+/* Color scale card enhancements */
+#attention-stats .card {
+    border: 1px solid #dee2e6;
+    background: linear-gradient(145deg, #ffffff 0%, #f8f9fa 100%);
+}
+
+#attention-stats .card-header {
+    background: linear-gradient(145deg, #e9ecef 0%, #f8f9fa 100%);
+    color: #495057;
+}
+
+@media (max-width: 768px) {
+    .horizontal-colorbar-wrapper {
+        max-width: 100%;
+    }
+    
+    .horizontal-colorbar {
+        height: 16px;
+    }
+} 
